@@ -98,11 +98,13 @@ function ytErrorToText(code) {
 window.onYouTubeIframeAPIReady = () => {
   ytReady = true;
 
-  const origin = window.location.origin; // <-- TIENE QUE SER http://localhost:3000
+  const origin = window.location.origin || "http://localhost:3000";
+  const host = "https://www.youtube.com";
 
   ytPlayer = new YT.Player("yt", {
     height: "100%",
     width: "100%",
+    host,
     playerVars: {
       autoplay: 0,
       controls: 1,

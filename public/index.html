@@ -103,9 +103,6 @@ window.onYouTubeIframeAPIReady = () => {
   ytPlayer = new YT.Player("yt", {
     height: "100%",
     width: "100%",
-    videoId: "",
-    // host evita inconsistencias raras de widgetapi / postMessage
-    host: "https://www.youtube-nocookie.com",
     playerVars: {
       autoplay: 0,
       controls: 1,
@@ -128,8 +125,22 @@ window.onYouTubeIframeAPIReady = () => {
   });
 };
 
-function ytLoadVideo(videoId) { if (ytReady && ytPlayer) ytPlayer.loadVideoById(videoId); }
-function ytLoadPlaylist(playlistId) { if (ytReady && ytPlayer) ytPlayer.loadPlaylist({ listType:"playlist", list: playlistId, index: 0 }); }
+function ytLoadVideo(videoId) {
+  if (!ytReady || !ytPlayer) return;
+  if (!videoId || typeof videoId !== "string") {
+    log("❌ YT error: videoId inválido:", videoId);
+    return;
+  }
+  ytPlayer.loadVideoById(videoId);
+}
+function ytLoadPlaylist(playlistId) {
+  if (!ytReady || !ytPlayer) return;
+  if (!playlistId || typeof playlistId !== "string") {
+    log("❌ YT error: playlistId inválido:", playlistId);
+    return;
+  }
+  ytPlayer.loadPlaylist({ listType:"playlist", list: playlistId, index: 0 });
+}
 
 async function ytSafePlay() {
   try {

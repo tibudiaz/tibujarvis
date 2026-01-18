@@ -261,7 +261,14 @@ app.get("/yt/search", requireYT, async (req, res) => {
 
     await ytEnsureAccessToken();
     const youtube = ytClient();
-    const r = await youtube.search.list({ part: ["snippet"], q, maxResults: limit, type: ["video"] });
+    const r = await youtube.search.list({
+      part: ["snippet"],
+      q,
+      maxResults: limit,
+      type: ["video"],
+      videoEmbeddable: "true",
+      videoSyndicated: "true"
+    });
 
     const results = (r.data.items || [])
       .map((it) => ({
@@ -531,4 +538,3 @@ wss.on("connection", (ws) => {
     }
   });
 });
-

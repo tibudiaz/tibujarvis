@@ -1,0 +1,577 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Jarvis (Realtime WebRTC)</title>
+  <style>
+    body { font-family: system-ui, Arial; padding: 16px; }
+    button, select { padding: 10px 14px; margin-right: 8px; margin-top: 8px; }
+    #log { white-space: pre-wrap; background:#111; color:#0f0; padding:12px; border-radius:10px; height: 360px; overflow:auto; margin-top: 12px; }
+    .row { display:flex; gap:12px; flex-wrap:wrap; align-items:center; }
+    label { display:flex; gap:8px; align-items:center; }
+    small { color:#444; }
+    #ytWrap { margin-top: 14px; max-width: 720px; }
+    #yt { width: 100%; aspect-ratio: 16/9; background:#000; border-radius:10px; overflow:hidden; }
+    .hint { color:#666; margin-top: 6px; }
+    .badge { display:inline-block; padding:2px 8px; border-radius:999px; background:#eee; font-size:12px; }
+    .codeBox { background:#f5f5f5; padding:10px; border-radius:10px; }
+    .codeBig { font-size: 22px; font-weight: 800; letter-spacing: 2px; }
+  </style>
+</head>
+<body>
+  <h2>Jarvis (Realtime WebRTC)</h2>
+
+  <div class="row">
+    <button id="start">Iniciar</button>
+    <button id="stop" disabled>Detener</button>
+    <span><b>Estado:</b> <span id="state">idle</span></span>
+    <span class="badge" id="ytStatus">YT: ...</span>
+    <button id="ytConnect">Conectar YouTube (Device OAuth)</button>
+  </div>
+
+  <div id="deviceBox" class="codeBox" style="display:none; margin-top:10px;">
+    <div><b>1)</b> Abrí este link en el celu/PC:</div>
+    <div><a id="verifyUrl" href="#" target="_blank" rel="noreferrer"></a></div>
+    <div style="margin-top:8px;"><b>2)</b> Ingresá este código:</div>
+    <div class="codeBig" id="userCode">----</div>
+    <div class="hint" id="pollHint"></div>
+  </div>
+
+  <div class="row">
+    <label>Micrófono: <select id="micSelect"></select></label>
+    <label>Salida (voz Jarvis): <select id="spkSelect"></select></label>
+    <small id="sinkNote"></small>
+  </div>
+
+  <div id="ytWrap">
+    <div id="yt"></div>
+    <div class="hint">
+      Comandos música: “poné X”, “poné mi playlist X”, “pausá”, “seguí”, “siguiente”.
+    </div>
+  </div>
+
+  <div id="log"></div>
+
+  <script src="https://www.youtube.com/iframe_api"></script>
+
+<script>
+let pc, dc, localStream, remoteAudio;
+
+// YouTube Player
+let ytPlayer = null;
+let ytReady = false;
+let ytUserGestureUnlocked = false;
+
+// UI
+const $state = document.getElementById("state");
+const $log = document.getElementById("log");
+const $mic = document.getElementById("micSelect");
+const $spk = document.getElementById("spkSelect");
+const $sinkNote = document.getElementById("sinkNote");
+const $ytStatus = document.getElementById("ytStatus");
+
+const $ytConnect = document.getElementById("ytConnect");
+const $deviceBox = document.getElementById("deviceBox");
+const $verifyUrl = document.getElementById("verifyUrl");
+const $userCode = document.getElementById("userCode");
+const $pollHint = document.getElementById("pollHint");
+
+const log = (...a) => { $log.textContent += a.join(" ") + "\n"; $log.scrollTop = $log.scrollHeight; };
+const setState = (s) => $state.textContent = s;
+function safeJsonParse(s) { try { return JSON.parse(s); } catch { return null; } }
+
+// ---- YT error codes ----
+function ytErrorToText(code) {
+  switch (code) {
+    case 2: return "Parámetros inválidos (videoId raro).";
+    case 5: return "Error de HTML5 Player (navegador/codec).";
+    case 100: return "Video no encontrado / eliminado.";
+    case 101: return "El dueño no permite reproducción embebida (embed).";
+    case 150: return "El dueño no permite reproducción embebida (embed).";
+    default: return "Error desconocido.";
+  }
+}
+
+// ==================== YouTube IFrame API ====================
+// FIX CLAVE: host + origin + enablejsapi
+window.onYouTubeIframeAPIReady = () => {
+  ytReady = true;
+
+  const origin = window.location.origin; // <-- TIENE QUE SER http://localhost:3000
+
+  ytPlayer = new YT.Player("yt", {
+    height: "100%",
+    width: "100%",
+    videoId: "",
+    // host evita inconsistencias raras de widgetapi / postMessage
+    host: "https://www.youtube-nocookie.com",
+    playerVars: {
+      autoplay: 0,
+      controls: 1,
+      rel: 0,
+      modestbranding: 1,
+      playsinline: 1,
+      enablejsapi: 1,
+      origin
+    },
+    events: {
+      onReady: () => {
+        log("🎵 YouTube Player listo (origin:", origin + ")");
+        try { ytPlayer.mute(); } catch {}
+      },
+      onError: (e) => {
+        const code = e?.data;
+        log("❌ YT error:", code, "-", ytErrorToText(code));
+      }
+    }
+  });
+};
+
+function ytLoadVideo(videoId) { if (ytReady && ytPlayer) ytPlayer.loadVideoById(videoId); }
+function ytLoadPlaylist(playlistId) { if (ytReady && ytPlayer) ytPlayer.loadPlaylist({ listType:"playlist", list: playlistId, index: 0 }); }
+
+async function ytSafePlay() {
+  try {
+    if (ytUserGestureUnlocked) { ytPlayer.unMute(); }
+    else { ytPlayer.mute(); }
+    ytPlayer.playVideo();
+  } catch {}
+}
+function ytPause() { try { ytPlayer?.pauseVideo(); } catch {} }
+function ytNext() { try { ytPlayer?.nextVideo(); } catch {} }
+
+// ==================== YouTube Device OAuth ====================
+async function ytStatus() {
+  const r = await fetch("/yt/status", { cache: "no-store" });
+  return r.json();
+}
+async function refreshYTBadge() {
+  const st = await ytStatus().catch(()=>({}));
+  const authed = !!st?.authed;
+  $ytStatus.textContent = `YT: ${authed ? "OK" : "NO AUTH"}`;
+  $ytStatus.style.background = authed ? "#d1fae5" : "#fee2e2";
+  return authed;
+}
+async function ytDeviceStart() {
+  const r = await fetch("/yt/device/start", { method: "POST" });
+  const data = await r.json().catch(()=>({}));
+  if (!r.ok || !data?.ok) throw new Error(data?.error || "No pude iniciar device flow");
+  return data;
+}
+async function ytDevicePoll() {
+  const r = await fetch("/yt/device/poll", { method: "POST" });
+  const data = await r.json().catch(()=>({}));
+  return { ok: r.ok, data };
+}
+let pollTimer = null;
+function stopPolling(){ if (pollTimer) clearInterval(pollTimer); pollTimer = null; }
+async function startPolling(intervalSec) {
+  stopPolling();
+  const ms = Math.max(1000, (intervalSec || 5) * 1000);
+  pollTimer = setInterval(async () => {
+    const { ok, data } = await ytDevicePoll();
+    if (ok && data?.ok && data?.pending) { $pollHint.textContent = "Esperando autorización..."; return; }
+    if (ok && data?.ok && data?.authed) {
+      stopPolling();
+      $pollHint.textContent = "Listo. Ya quedó autorizado.";
+      await refreshYTBadge();
+      setTimeout(()=>{ $deviceBox.style.display="none"; }, 1200);
+      return;
+    }
+    if (!ok) { stopPolling(); $pollHint.textContent = `Error: ${data?.error || "poll failed"}`; }
+  }, ms);
+}
+$ytConnect.onclick = async () => {
+  try {
+    const authed = await refreshYTBadge();
+    if (authed) { log("🎵 YouTube ya está conectado."); return; }
+    const d = await ytDeviceStart();
+    $deviceBox.style.display = "block";
+    $verifyUrl.textContent = d.verification_url;
+    $verifyUrl.href = d.verification_url;
+    $userCode.textContent = d.user_code;
+    $pollHint.textContent = "Esperando autorización...";
+    log("🔐 Device OAuth iniciado. Autorizá en el link con el código.");
+    await startPolling(d.interval);
+  } catch (e) { log("❌", e.message); }
+};
+
+// ==================== Devices ====================
+async function refreshDevices() {
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  const mics = devices.filter(d => d.kind === "audioinput");
+  const spks = devices.filter(d => d.kind === "audiooutput");
+
+  $mic.innerHTML = "";
+  mics.forEach((d, i) => {
+    const opt = document.createElement("option");
+    opt.value = d.deviceId;
+    opt.textContent = d.label || `Micrófono ${i+1}`;
+    $mic.appendChild(opt);
+  });
+
+  $spk.innerHTML = "";
+  spks.forEach((d, i) => {
+    const opt = document.createElement("option");
+    opt.value = d.deviceId;
+    opt.textContent = d.label || `Salida ${i+1}`;
+    $spk.appendChild(opt);
+  });
+
+  const savedMic = localStorage.getItem("jarvis_mic");
+  const savedSpk = localStorage.getItem("jarvis_spk");
+  if (savedMic) $mic.value = savedMic;
+  if (savedSpk) $spk.value = savedSpk;
+
+  if (!HTMLMediaElement.prototype.setSinkId) $sinkNote.textContent = "Tu navegador no soporta setSinkId. Usá Chrome/Edge.";
+  else $sinkNote.textContent = "OK: podés elegir salida para la voz de Jarvis.";
+}
+$mic.addEventListener("change", () => localStorage.setItem("jarvis_mic", $mic.value));
+$spk.addEventListener("change", () => localStorage.setItem("jarvis_spk", $spk.value));
+
+// ==================== Sinric ====================
+async function lights(room, state) {
+  const r = await fetch("/home/lights", {
+    method: "POST",
+    headers: { "Content-Type":"application/json" },
+    body: JSON.stringify({ room, state })
+  });
+  const data = await r.json().catch(()=>({}));
+  if (!r.ok) throw new Error(data?.error || "Sinric error");
+  return data;
+}
+function normalizeRoom(t) {
+  if (t.includes("cocina")) return "cocina";
+  if (t.includes("living")) return "living";
+  return null;
+}
+function parseLightsCommand(text) {
+  const t = (text || "").toLowerCase();
+  const mentions = t.includes("luz") || t.includes("luces") || t.includes("lampara") || t.includes("led");
+  const on  = t.includes("prend") || t.includes("enciend") || t.includes("activar");
+  const off = t.includes("apag") || t.includes("desactiv");
+  if (!mentions || (!on && !off)) return null;
+  const room = normalizeRoom(t);
+  if (!room) return null;
+  return { room, state: on ? "on" : "off" };
+}
+
+// ==================== Mercado Libre ====================
+async function mlSearch(query, limit = 6) {
+  const url = `/ml/search?q=${encodeURIComponent(query)}&limit=${encodeURIComponent(String(limit))}`;
+  const r = await fetch(url, { cache: "no-store" });
+  const data = await r.json().catch(()=>({}));
+  if (!r.ok || !data?.ok) throw new Error(data?.error || `ML error (${r.status})`);
+  return data;
+}
+function parseMercadoLibreQuery(text) {
+  const t = (text || "").toLowerCase().trim();
+  const hasML = t.includes("mercado libre") || t.includes("mercadolibre") || t.startsWith("ml ");
+  if (!hasML) return null;
+  let q = t
+    .replace("mercado libre", "")
+    .replace("mercadolibre", "")
+    .replace(/\b(en|busca|buscá|buscar|ml)\b/g, " ")
+    .replace(":", " ")
+    .trim();
+  q = q.replace(/\s+/g, " ").trim();
+  return q || null;
+}
+
+// ==================== YouTube API via server ====================
+async function ytSearchVideo(query) {
+  const r = await fetch(`/yt/search?q=${encodeURIComponent(query)}&limit=8`, { cache:"no-store" });
+  const data = await r.json().catch(()=>({}));
+  if (!r.ok || !data?.ok) throw new Error(data?.error || "YT search error");
+  return data.results || [];
+}
+async function ytResolvePlaylist(name) {
+  const r = await fetch(`/yt/playlist/resolve?name=${encodeURIComponent(name)}`, { cache:"no-store" });
+  const data = await r.json().catch(()=>({}));
+  if (!r.ok || !data?.ok) throw new Error(data?.error || "YT resolve error");
+  return data;
+}
+
+// ==================== Music parsing ====================
+function parseMusicCommand(text) {
+  const raw = (text || "").trim();
+  const t = raw.toLowerCase();
+
+  if (t.includes("pausa") || t.includes("pausá") || t.includes("detené") || t.includes("detene")) return { kind: "pause" };
+  if (t.includes("seguí") || t.includes("segui") || t.includes("continuá") || t.includes("continua")) return { kind: "resume" };
+  if (t.includes("siguiente")) return { kind: "next" };
+
+  if (t.includes("playlist") || t.includes("lista de reproduccion") || t.includes("lista de reproducción")) {
+    let q = raw
+      .replace(/lista de reproducci[oó]n/ig, "")
+      .replace(/lista/ig, "")
+      .replace(/playlist/ig, "")
+      .replace(/pon[eé]\s*/ig, "")
+      .replace(/reproduc[ií]\s*/ig, "")
+      .replace(/reproduci\s*/ig, "")
+      .trim();
+    if (!q) q = "mis playlists";
+    return { kind: "playlist", query: q };
+  }
+
+  if (t.startsWith("poné") || t.startsWith("pone") || t.startsWith("poneme") || t.startsWith("reproducí") || t.startsWith("reproduci")) {
+    let q = raw
+      .replace(/^pon[eé]\s*/i, "")
+      .replace(/^pone\s*/i, "")
+      .replace(/^poneme\s*/i, "")
+      .replace(/^reproduc[ií]\s*/i, "")
+      .replace(/^reproduci\s*/i, "")
+      .trim();
+    if (!q || ["música","musica"].includes(q.toLowerCase())) q = "mix música";
+    return { kind: "song", query: q };
+  }
+
+  if (t === "musica" || t === "música" || t.includes("poné música") || t.includes("pone musica")) {
+    return { kind: "song", query: "mix música" };
+  }
+
+  return null;
+}
+
+// ==================== DataChannel helpers ====================
+function dcSend(obj) {
+  if (!dc || dc.readyState !== "open") return false;
+  dc.send(JSON.stringify(obj));
+  return true;
+}
+function tellJarvisText(text) {
+  dcSend({ type: "conversation.item.create", item: { type: "message", role: "user", content: [{ type: "input_text", text }] } });
+  dcSend({ type: "response.create" });
+}
+
+// ==================== Transcript extraction ====================
+function extractTranscript(msg) {
+  const t1 = msg?.transcript;
+  if (typeof t1 === "string" && t1.trim()) return t1.trim();
+  const t2 = msg?.transcription?.text;
+  if (typeof t2 === "string" && t2.trim()) return t2.trim();
+  const t3 = msg?.item?.content?.[0]?.transcript || msg?.item?.content?.[0]?.text;
+  if (typeof t3 === "string" && t3.trim()) return t3.trim();
+  return "";
+}
+let lastUserText = "", lastUserAt = 0;
+function shouldDedupe(text) {
+  const now = Date.now();
+  const t = (text || "").trim().toLowerCase();
+  if (!t) return true;
+  if (t === lastUserText && (now - lastUserAt) < 1200) return true;
+  lastUserText = t; lastUserAt = now;
+  return false;
+}
+
+// ---------- helper: wait playable or not ----------
+function waitPlayable(timeoutMs = 2200) {
+  return new Promise((resolve) => {
+    if (!ytPlayer || !ytReady) return resolve(false);
+    const start = Date.now();
+    const timer = setInterval(() => {
+      const st = ytPlayer.getPlayerState?.();
+      if (st === 1 || st === 3 || st === 5) { clearInterval(timer); return resolve(true); }
+      if (Date.now() - start > timeoutMs) { clearInterval(timer); return resolve(false); }
+    }, 120);
+  });
+}
+
+// ==================== MAIN ====================
+async function start() {
+  setState("starting...");
+  log("🎤 Pidiendo permisos de audio...");
+
+  // Esto + click = gesto del usuario (permite play)
+  const warm = await navigator.mediaDevices.getUserMedia({ audio: true });
+  warm.getTracks().forEach(t => t.stop());
+  ytUserGestureUnlocked = true;
+
+  await refreshDevices();
+  await refreshYTBadge();
+
+  const micId = $mic.value;
+  const spkId = $spk.value;
+
+  log("🎙️ Usando mic:", ($mic.selectedOptions[0]?.textContent || micId));
+  log("🔊 Salida elegida:", ($spk.selectedOptions[0]?.textContent || spkId));
+
+  localStream = await navigator.mediaDevices.getUserMedia({
+    audio: {
+      deviceId: micId ? { exact: micId } : undefined,
+      channelCount: 1,
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true
+    }
+  });
+
+  const track = localStream.getAudioTracks()[0];
+  log("✅ Mic activo:", track.label || "(sin label)");
+
+  pc = new RTCPeerConnection();
+
+  remoteAudio = document.createElement("audio");
+  remoteAudio.autoplay = true;
+
+  if (remoteAudio.setSinkId && spkId) {
+    try { await remoteAudio.setSinkId(spkId); log("✅ setSinkId OK (salida aplicada)"); }
+    catch (e) { log("⚠️ No pude aplicar salida:", e.message); }
+  }
+
+  pc.ontrack = (e) => {
+    remoteAudio.srcObject = e.streams[0];
+    log("🔊 Audio remoto conectado");
+  };
+
+  pc.addTrack(track, localStream);
+
+  dc = pc.createDataChannel("oai-events");
+  dc.onopen = () => log("🟢 DataChannel abierto");
+  dc.onclose = () => log("🟡 DataChannel cerrado");
+
+  dc.onmessage = async (ev) => {
+    const msg = safeJsonParse(ev.data);
+    if (!msg) return;
+
+    const type = msg.type || msg.event || "";
+    if (type.includes("speech_started")) log("🎙️ speech_started");
+    if (type.includes("speech_stopped") || type.includes("speech_ended")) log("🎙️ speech_ended");
+    if (type.includes("error")) log("❌ event error:", JSON.stringify(msg));
+
+    const transcript = extractTranscript(msg);
+    if (!transcript) return;
+    if (shouldDedupe(transcript)) return;
+
+    log("📝 Vos:", transcript);
+
+    // Música
+    const mc = parseMusicCommand(transcript);
+    if (mc) {
+      try {
+        if (mc.kind === "pause") { ytPause(); tellJarvisText("Listo."); return; }
+        if (mc.kind === "resume") { await ytSafePlay(); tellJarvisText("Dale."); return; }
+        if (mc.kind === "next") { ytNext(); tellJarvisText("Siguiente."); return; }
+
+        const authed = await refreshYTBadge();
+        if (!authed) { tellJarvisText("Conectá YouTube con el botón, culiado."); return; }
+
+        if (mc.kind === "song") {
+          log("🎵 Buscar:", mc.query);
+          const results = await ytSearchVideo(mc.query);
+
+          for (let i = 0; i < Math.min(results.length, 6); i++) {
+            const top = results[i];
+            if (!top?.videoId) continue;
+            log("▶️ Probando:", top.title);
+            ytLoadVideo(top.videoId);
+
+            const ok = await waitPlayable(2200);
+            if (ok) {
+              await ytSafePlay();
+              tellJarvisText("Listo.");
+              return;
+            }
+          }
+
+          tellJarvisText("Ese tema no se deja por acá. Probá otro nombre, culiado.");
+          return;
+        }
+
+        if (mc.kind === "playlist") {
+          log("🎵 Playlist (fuzzy):", mc.query);
+          const resolved = await ytResolvePlaylist(mc.query);
+          if (!resolved?.found) { tellJarvisText("No la cazé. Decime el nombre más parecido."); return; }
+          ytLoadPlaylist(resolved.playlist.id);
+          setTimeout(async ()=>{ await ytSafePlay(); }, 700);
+          tellJarvisText("De una.");
+          return;
+        }
+      } catch (e) {
+        log("❌", e.message);
+        tellJarvisText("Se trabó YouTube. Probá de nuevo.");
+      }
+      return;
+    }
+
+    // Luces
+    const lc = parseLightsCommand(transcript);
+    if (lc) {
+      try {
+        log("💡 Comando:", lc.state.toUpperCase(), "->", lc.room);
+        const result = await lights(lc.room, lc.state);
+        tellJarvisText(result.ok ? "Listo." : "No respondió.");
+      } catch (e) {
+        log("❌", e.message);
+        tellJarvisText("Falló eso.");
+      }
+      return;
+    }
+
+    // Mercado Libre
+    const q = parseMercadoLibreQuery(transcript);
+    if (q) {
+      try {
+        log("🛒 ML:", q);
+        const data = await mlSearch(q, 6);
+        const top = (data.results || []).slice(0, 3).map((it, i) => {
+          const price = typeof it.price === "number" ? it.price.toLocaleString("es-AR") : it.price;
+          return `${i+1}) ${it.title} - ${price} ${it.currency_id}`;
+        }).join("\n");
+        tellJarvisText(`3 opciones:\n${top}`);
+      } catch (e) {
+        log("❌", e.message);
+        tellJarvisText("No pude traer eso ahora.");
+      }
+      return;
+    }
+  };
+
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+
+  log("📡 Enviando SDP a /session...");
+  const sdpResp = await fetch("/session", {
+    method: "POST",
+    headers: { "Content-Type":"application/sdp" },
+    body: offer.sdp
+  });
+
+  const answerSdp = await sdpResp.text();
+  if (!sdpResp.ok) { log("❌ /session error:", answerSdp); throw new Error("Session failed"); }
+  if (!answerSdp.startsWith("v=")) throw new Error("Respuesta no SDP");
+
+  await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
+
+  setState("running");
+  log("✅ Listo.");
+}
+
+function stop() {
+  setState("stopping...");
+  try { dc?.close(); } catch {}
+  try { pc?.close(); } catch {}
+  try { localStream?.getTracks().forEach(t => t.stop()); } catch {}
+  setState("idle");
+  log("🛑 Detenido");
+}
+
+document.getElementById("start").onclick = async () => {
+  document.getElementById("start").disabled = true;
+  document.getElementById("stop").disabled = false;
+  try { await start(); } catch (e) { log("❌", e.message); stop(); }
+};
+document.getElementById("stop").onclick = () => {
+  document.getElementById("start").disabled = false;
+  document.getElementById("stop").disabled = true;
+  stop();
+};
+
+(async () => {
+  try { await refreshDevices(); } catch {}
+  try { await refreshYTBadge(); } catch {}
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,26 @@
+{
+  "name": "jarvis-server",
+  "type": "module",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "dotenv": "^17.2.3",
+    "express": "^5.2.1",
+    "fs": "^0.0.1-security",
+    "googleapis": "^170.1.0",
+    "http": "^0.0.1-security",
+    "https": "^1.0.0",
+    "mic": "^2.1.2",
+    "path": "^0.12.7",
+    "speaker": "^0.5.5",
+    "wave-resampler": "^1.0.0",
+    "ws": "^8.19.0"
+  }
+}
